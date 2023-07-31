@@ -10,5 +10,5 @@ $(TARGET): writer.c
 	$(cc) $< -o $@
 
 clean:
-	rm $(TARGET)
+	$(RM) $(TARGET)
 

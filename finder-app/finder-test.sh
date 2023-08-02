@@ -49,9 +49,9 @@ then
 	fi
 fi
 
-echo "Clean old build artifacts..."
-make clean
-make
+#echo "Clean old build artifacts..."
+#make clean
+#make
 
 for i in $( seq 1 $NUMFILES)
 do

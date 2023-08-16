@@ -2,12 +2,10 @@
 
 TARGET = writer
 
-cc = $(CROSS_COMPILE)gcc
-
 all: $(TARGET)
 
 $(TARGET): writer.c
-	$(cc) $< -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) $(OBJS) $< -o $@ $(LDFLAGS)
 
 clean:
 	$(RM) $(TARGET)

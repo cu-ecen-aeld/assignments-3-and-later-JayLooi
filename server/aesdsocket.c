@@ -200,6 +200,9 @@ int main (int argc, char *argv[])
             
             if (n_read == 0)
             {
+                free_wrapper(buf);
+                available_space = 0;
+                total_byte_read = 0;
                 connected = false;
                 break;
             }
@@ -244,6 +247,8 @@ int main (int argc, char *argv[])
             }
 
             free_wrapper(buf);
+            available_space = 0;
+            total_byte_read = 0;
 
             struct stat statebuf;
             if (fstat(outfiled, &statebuf) != 0)

@@ -3,6 +3,8 @@
 
 TARGET = aesdsocket
 
+all: $(TARGET)
+
 $(TARGET): aesdsocket.c
 	$(CC) $(CFLAGS) $(INCLUDES) $(OBJS) $< -o $@ $(LDFLAGS)
 

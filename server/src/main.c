@@ -57,6 +57,9 @@
     cleanup(&collector);                        \
     return ret_code;
 
+#define TIMESTAMP_PREFIX            "timestamp:"
+#define TIMESTAMP_PREFIX_LEN        (sizeof(TIMESTAMP_PREFIX) - 1UL)
+
 typedef enum
 {
     SYSTEM_STATE_INIT, 
@@ -72,15 +75,23 @@ typedef struct ThreadNode
     SLIST_ENTRY(ThreadNode) node;
 } ThreadNode_t;
 
+typedef struct
+{
+    int output_fd;
+    pthread_mutex_t *mutex;
+} TimerThreadParams_t;
+
 SLIST_HEAD(slisthead, ThreadNode);
 
 const static char tempfile[] = "/var/tmp/aesdsocketdata";
 const static int allocated_chunk_size = 4096;
+const static char rfc2822_compliant_datetime_format[] = "%a, %d %b %Y %T %z\n";
 
 static bool interrupt_signal_received = false;
 static SystemState_t system_state = SYSTEM_STATE_INIT;
 
 void signal_handler (int sig);
+void timer_handler (union sigval sigval);
 void handle_completed_threads (struct slisthead *thread_list_head);
 void *socket_connection_thread (void *params);
 
@@ -103,12 +114,16 @@ int main (int argc, char *argv[])
     struct slisthead *thread_list_head_ptr = &thread_list_head;
     ThreadNode_t *last_thread_node = NULL;
     bool unexpected_error = false;
+    struct sigevent sev;
+    TimerThreadParams_t timer_thread_params;
+    timer_t timer_id = 0;
+    struct itimerspec its;
 
     openlog(NULL, 0, LOG_USER);
 
     initialize_resource_collector(&main_thread_res_collector, NULL, 0U, 
                                   open_file_fd, sizeof(open_file_fd) / sizeof(open_file_fd[0]));
-    
+
     rc = pthread_mutex_init(&output_file_mutex, NULL);
     if (rc != 0)
     {
@@ -119,7 +134,7 @@ int main (int argc, char *argv[])
     
     SLIST_INIT(thread_list_head_ptr);
 
-    output_fd = open(tempfile, O_CREAT | O_RDWR);
+    output_fd = open(tempfile, O_CREAT | O_RDWR | O_TRUNC, S_IRWXU);
     if (output_fd == -1)
     {
         syslog(LOG_ERR, "open() %s file error: %s", tempfile, strerror(errno));
@@ -149,6 +164,18 @@ int main (int argc, char *argv[])
     {
         run_as_daemon = true;
     }
+    
+    memset(&sev, 0, sizeof(sev));
+    timer_thread_params.mutex = &output_file_mutex;
+    timer_thread_params.output_fd = output_fd;
+    sev.sigev_notify = SIGEV_THREAD;
+    sev.sigev_value.sival_ptr = (void *)&timer_thread_params;
+    sev.sigev_notify_function = timer_handler;
+
+    its.it_value.tv_sec = 10;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = its.it_value.tv_sec;
+    its.it_interval.tv_nsec = its.it_value.tv_nsec;
 
     while ((interrupt_signal_received == false) && (unexpected_error == false))
     {
@@ -206,6 +233,28 @@ int main (int argc, char *argv[])
             else
             {
                 system_state = SYSTEM_STATE_SOCK_START_LISTENING;
+            }
+
+            if (system_state == SYSTEM_STATE_SOCK_START_LISTENING)
+            {
+                rc = timer_create(CLOCK_MONOTONIC, &sev, &timer_id);
+                if (rc != 0)
+                {
+                    syslog(LOG_ERR, "timer creation failed: %s", strerror(errno));
+                    cleanup(&main_thread_res_collector);
+                    closelog();
+                    return 1;
+                }
+
+                rc = timer_settime(timer_id, 0, &its, NULL);
+                if (rc != 0)
+                {
+                    syslog(LOG_ERR, "timer creation failed: %s", strerror(errno));
+                    timer_delete(timer_id);
+                    cleanup(&main_thread_res_collector);
+                    closelog();
+                    return 1;
+                }
             }
             break;
         
@@ -284,17 +333,19 @@ int main (int argc, char *argv[])
         syslog(LOG_INFO, "Caught signal, exiting");
     }
 
-    ThreadNode_t *node;
-    SLIST_FOREACH(node, thread_list_head_ptr, node)
+    ThreadNode_t *tmp_node = thread_list_head_ptr->slh_first;
+    while (tmp_node)
     {
-        pthread_join(node->thread_id, NULL);
-        free(node->thread_params);
-        SLIST_REMOVE(thread_list_head_ptr, node, ThreadNode, node);
-        free(node);
+        pthread_join(tmp_node->thread_id, NULL);
+        free(tmp_node->thread_params);
+        SLIST_REMOVE(thread_list_head_ptr, tmp_node, ThreadNode, node);
+        free(tmp_node);
+        tmp_node = thread_list_head_ptr->slh_first;
     }
 
     pthread_mutex_destroy(&output_file_mutex);
     cleanup(&main_thread_res_collector);
+    timer_delete(timer_id);
     closelog();
 
     if (unexpected_error)
@@ -313,15 +364,30 @@ void signal_handler (int sig)
     }
 }
 
+void timer_handler (union sigval sigval)
+{
+    char cur_timestamp[64] = TIMESTAMP_PREFIX;
+    TimerThreadParams_t *thread_params = (TimerThreadParams_t *)sigval.sival_ptr;
+
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    size_t n_byte = strftime(&cur_timestamp[TIMESTAMP_PREFIX_LEN], sizeof(cur_timestamp) - TIMESTAMP_PREFIX_LEN, 
+                                rfc2822_compliant_datetime_format, tm);
+
+    pthread_mutex_lock(thread_params->mutex);
+    ssize_t written = write(thread_params->output_fd, cur_timestamp, strlen(cur_timestamp));
+    pthread_mutex_unlock(thread_params->mutex);
+}
+
 void handle_completed_threads (struct slisthead *thread_list_head)
 {
-    ThreadNode_t *node;
-
     if (thread_list_head == NULL)
     {
         return;
     }
 
+    ThreadNode_t *node;
+    ThreadNode_t *prev_node = thread_list_head->slh_first;
     SLIST_FOREACH(node, thread_list_head, node)
     {
         if (node->thread_params->done)
@@ -330,6 +396,11 @@ void handle_completed_threads (struct slisthead *thread_list_head)
             free(node->thread_params);
             SLIST_REMOVE(thread_list_head, node, ThreadNode, node);
             free(node);
+            node = prev_node;
+        }
+        else
+        {
+            prev_node = node;
         }
     }
 }
@@ -339,6 +410,7 @@ void *socket_connection_thread (void *params)
     ConnThreadParams_t *thread_params = (ConnThreadParams_t *)params;
     ResourcesCollector_t conn_thread_res_collector;
     void *allocated_mem_container[] = { NULL, NULL };
+    int open_file_fd[] = { -1 };
     bool connected = true;
     int error_code = 0;
     int available_space = 0;
@@ -351,8 +423,9 @@ void *socket_connection_thread (void *params)
 
     initialize_resource_collector(&conn_thread_res_collector, allocated_mem_container, 
                                   sizeof(allocated_mem_container) / sizeof(allocated_mem_container[0]), 
-                                  NULL, 0U);
-
+                                  open_file_fd, sizeof(open_file_fd) / sizeof(open_file_fd[0]));
+    register_fd(&conn_thread_res_collector, cfd);
+    
     while (connected)
     {
         if (available_space == 0)
@@ -375,12 +448,9 @@ void *socket_connection_thread (void *params)
         }
         
         ssize_t n_read = recv(cfd, &buf[total_byte_read], available_space, MSG_DONTWAIT);
-        
+
         if (n_read == 0)
         {
-            free_wrapper(&conn_thread_res_collector, buf);
-            available_space = 0;
-            total_byte_read = 0;
             connected = false;
             break;
         }
@@ -490,6 +560,13 @@ void *socket_connection_thread (void *params)
                 CLEAN_RETURN(conn_thread_res_collector, NULL);
             }
         }
+
+        if (lseek(output_fd, 0, SEEK_END) == -1)
+        {
+            pthread_mutex_unlock(mutex);
+            syslog(LOG_ERR, "lseek() error: %s", strerror(errno));
+            CLEAN_RETURN(conn_thread_res_collector, NULL);
+        }
         pthread_mutex_unlock(mutex);
 
         free_wrapper(&conn_thread_res_collector, buf);
@@ -502,5 +579,5 @@ void *socket_connection_thread (void *params)
 
     thread_params->done = true;
 
-    return NULL;
+    CLEAN_RETURN(conn_thread_res_collector, NULL);;
 }

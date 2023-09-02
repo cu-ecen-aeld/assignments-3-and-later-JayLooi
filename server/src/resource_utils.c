@@ -64,6 +64,8 @@ void initialize_resource_collector (ResourcesCollector_t *collector,
     {
         return;
     }
+
+    memset(collector, 0, sizeof(ResourcesCollector_t));
     
     collector->allocated_mem = allocated_mem_container;
     if (allocated_mem_container == NULL)

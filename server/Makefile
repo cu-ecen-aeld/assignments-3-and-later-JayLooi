@@ -6,7 +6,7 @@ BUILD_DIR = ./build
 INCLUDES = -I./include
 SOURCES = $(wildcard src/*.c)
 OBJS = $(SOURCES:%=$(BUILD_DIR)/%.o)
-LDFLAGS += -lpthread
+LDFLAGS += -lpthread -lrt
 
 all: $(TARGET)
 

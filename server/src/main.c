@@ -372,7 +372,7 @@ void timer_handler (union sigval sigval)
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
     size_t n_byte = strftime(&cur_timestamp[TIMESTAMP_PREFIX_LEN], sizeof(cur_timestamp) - TIMESTAMP_PREFIX_LEN, 
-                                rfc2822_compliant_datetime_format, tm);
+                             rfc2822_compliant_datetime_format, tm);
 
     pthread_mutex_lock(thread_params->mutex);
     ssize_t written = write(thread_params->output_fd, cur_timestamp, strlen(cur_timestamp));
